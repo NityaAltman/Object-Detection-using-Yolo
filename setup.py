@@ -1,7 +1,7 @@
 from setuptools import find_packages, setup
 
 setup(
-    name = 'wasteDetection',
+    name = 'satelliteDetection',
     version= '0.0.0',
     author= 'Nitya Altman',
     author_email= 'suonnityaloogip@gmail.com',
