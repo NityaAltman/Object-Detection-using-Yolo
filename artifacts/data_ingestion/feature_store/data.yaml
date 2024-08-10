@@ -1,5 +1,0 @@
-train: ../train/images  # train images (relative to 'path')
-val: /valid/images  # val images (relative to 'path')
-
-nc: 2
-names: ['car', 'swimming pool']
