@@ -19,11 +19,21 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Lint code
-        run: echo "Linting repository"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      # The suite stubs the model, so torch and the weights are not needed
+      # here. Installing the full runtime would add several minutes per run.
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flask==3.0.3 flask-cors==5.0.0 pillow==10.4.0 pytest==8.3.3
 
       - name: Run unit tests
-        run: echo "Running unit tests"
+        run: pytest
 
   build-and-push-ecr-image:
     name: Build and Push to ECR
