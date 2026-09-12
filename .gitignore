@@ -159,3 +159,14 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 artifacts/*
+
+# Model weights: too large for git. COCO weights are downloaded on first use;
+# the satellite checkpoint is produced by train_satellite.py.
+*.pt
+weights/*.pt
+!weights/.gitkeep
+
+# Ultralytics / matplotlib caches when running locally
+.cache/
+runs/
+.DS_Store

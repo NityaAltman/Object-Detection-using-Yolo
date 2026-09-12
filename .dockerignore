@@ -1,0 +1,27 @@
+.git
+.github
+.idea
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+
+# Training data and artifacts: not needed to serve the app, and large.
+data.zip
+data/train
+data/valid
+yolov5/train
+yolov5/valid
+yolov5/runs
+artifacts
+research
+log
+*.log
+
+# Model weights are mounted or trained, never baked in from the build context.
+weights/*.pt
+
+.DS_Store
+.pytest_cache
+tests
