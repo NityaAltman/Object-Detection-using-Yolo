@@ -4,6 +4,10 @@ Object detection over HTTP: drop in an image, get bounding boxes back, and
 sweep the confidence threshold live in the browser without re-running
 inference.
 
+![Nitya Vision System UI v2 — satellite model detecting cars](docs/ui-v2.jpg)
+
+*UI v2 — `sat` model on a 224×224 aerial tile (cars + live confidence filter).*
+
 Two families of weights are served from the same UI:
 
 | Model | Classes | Best for |
