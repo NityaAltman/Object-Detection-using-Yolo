@@ -1,0 +1,5 @@
+Trained checkpoints live here.
+
+`satellite.pt` is produced by `python train_satellite.py` and is intentionally
+not committed — see .gitignore. The COCO models (yolov8n/s/m.pt) are fetched by
+Ultralytics on first use and cached by it, not stored here.
