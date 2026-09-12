@@ -169,4 +169,5 @@ weights/*.pt
 # Ultralytics / matplotlib caches when running locally
 .cache/
 runs/
-.DS_Store
+.DS_Storesatellite1.png
+data.zip
