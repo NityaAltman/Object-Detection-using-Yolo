@@ -1,93 +1,157 @@
-import sys,os
-from satelliteDetection.pipeline.training_pipeline import TrainPipeline
-from satelliteDetection.utils.main_utils import decodeImage, encodeImageIntoBase64
-from flask import Flask, request, jsonify, render_template,Response
-from flask_cors import CORS, cross_origin
-from satelliteDetection.constant.application import APP_HOST, APP_PORT
-from satelliteDetection.pipeline.training_pipeline import TrainPipeline
-import json
-import glob
-import shutil
+"""Satellite / general-purpose object detection web app.
 
-# obj = TrainPipeline()
-# obj.start_model_trainer()
-# obj.run_pipeline()
+HTTP layer only: request validation, error mapping and JSON shaping. All model
+work lives in :mod:`detector`.
+
+The client uploads an image once and receives every detection down to a low
+confidence floor; the confidence slider in the browser then filters that same
+response, so sweeping the threshold costs no further requests.
+"""
+from __future__ import annotations
+
+import logging
+import os
+
+from flask import Flask, jsonify, render_template, request
+from flask_cors import CORS
+from PIL import Image, ImageOps
+
+from detector import Detector, WeightsUnavailable
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+
+# Detections below this are never returned. The client-side slider filters
+# everything above it, so it can sit low without flooding the response.
+MIN_SERVER_CONFIDENCE = 0.10
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 CORS(app)
 
-class ClientApp:
-    def __init__(self):
-        self.filename = "inputImage.jpg"
-@app.route("/train")
-def trainRoute():
-    obj = TrainPipeline()
-    obj.start_model_trainer()
-    return "Training Successfull!!"
+detector = Detector()
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@app.errorhandler(413)
+def upload_too_large(_error):
+    """Return JSON rather than Werkzeug's HTML page.
+
+    The frontend parses every response as JSON, so an HTML body here surfaces
+    as a parser error instead of a usable message.
+    """
+    limit_mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+    return jsonify({"error": f"That image is larger than {limit_mb}MB."}), 413
+
 
 @app.route("/")
-def home():
-    return render_template("index.html")
+def index():
+    return render_template(
+        "index.html",
+        models=Detector.catalog(),
+        default_model=Detector.DEFAULT_MODEL,
+        max_upload_mb=MAX_UPLOAD_BYTES // (1024 * 1024),
+    )
 
 
+@app.route("/api/models")
+def models():
+    return jsonify(Detector.catalog())
 
-@app.route("/predict", methods=['POST','GET'])
-@cross_origin()
-def predictRoute():
+
+@app.route("/api/detect", methods=["POST"])
+def detect():
+    if "image" not in request.files:
+        return jsonify({"error": "No image was attached to the request."}), 400
+
+    upload = request.files["image"]
+    model_name = request.form.get("model", Detector.DEFAULT_MODEL)
+
+    if not Detector.is_known(model_name):
+        return jsonify({"error": f"Unknown model '{model_name}'."}), 400
+
     try:
-        image = request.json['image']
-        decodeImage(image, clApp.filename)
+        image = Image.open(upload.stream)
+        image.load()
+        # Cameras record the sensor's raw orientation and attach an EXIF tag
+        # telling viewers how to rotate it. Browsers honour that tag, so
+        # without this the model is fed a sideways image while the user looks
+        # at an upright one -- which both garbles the class predictions and
+        # makes the reported width/height disagree with what the canvas draws.
+        image = ImageOps.exif_transpose(image).convert("RGB")
+    except Exception:
+        return jsonify({"error": "That file couldn't be read as an image."}), 400
 
-        os.system("cd yolov5/ && python detect.py --weights mymodelepoch50.pt --img 416 --conf 0.5 --source ../data/inputImage.jpg")
+    try:
+        result = detector.run(image, model_name, MIN_SERVER_CONFIDENCE)
+    except WeightsUnavailable as exc:
+        # Expected when the satellite model hasn't been trained yet.
+        return jsonify({"error": str(exc)}), 503
+    except Exception:
+        logger.exception("Inference failed for model %s", model_name)
+        return jsonify({"error": "Detection failed on the server. Check the logs."}), 500
 
-        # Assuming detect.py outputs results in a JSON format saved to a file (e.g., results.json)
-        with open('data/detection_results.json', 'r', encoding='utf-8') as f:
-            detection_results = json.load(f)
-        print(type(detection_results))  # Check the type of detection_results
-        print(detection_results)  # Print the content of detection_results
+    return jsonify(result)
 
-        # Process detection results based on the actual structure of detection_results
-        counts_result = {}
-        if isinstance(detection_results, list):  # Example: handling a list of strings scenario
-            for item in detection_results:
-                key, value = item.split(":")
-                counts_result[key.strip()] = int(value.strip())
-        elif isinstance(detection_results, dict):  # If already a dictionary
-            counts_result = detection_results
-        elif isinstance(detection_results, str):  # If it's a string that needs parsing
-            import ast
-            counts_result = ast.literal_eval(detection_results)
 
-        # Find the latest 'exp*' directory
-        exp_dirs = glob.glob("yolov5/runs/detect/exp*")
-        latest_exp_dir = max(exp_dirs, key=os.path.getctime) if exp_dirs else None
+@app.route("/train", methods=["POST"])
+def train():
+    """Kick off the satellite training pipeline.
 
-        if latest_exp_dir:
-            image_path = os.path.join(latest_exp_dir, "inputImage.jpg")
-            if not os.path.exists(image_path):
-                return Response("Output image not found", status=500)
+    Disabled unless ENABLE_TRAIN_ENDPOINT is set, because it is unauthenticated
+    and runs for a long time: left open on a deployed instance, anyone who can
+    reach the URL can saturate the box. It also blocks the worker it runs on,
+    so it is meant for local use rather than production traffic.
+    """
+    if not _env_flag("ENABLE_TRAIN_ENDPOINT"):
+        return (
+            jsonify(
+                {
+                    "error": "Training endpoint is disabled. Set "
+                    "ENABLE_TRAIN_ENDPOINT=1 to enable it, or run "
+                    "`python train_satellite.py` directly."
+                }
+            ),
+            403,
+        )
 
-        opencodedbase64 = encodeImageIntoBase64(image_path)
-        encoded_image = opencodedbase64.decode('utf-8')
+    try:
+        from satelliteDetection.pipeline.training_pipeline import TrainPipeline
 
-        # Path to the directory containing the exp directories
-        exp_dirs = glob.glob("yolov5/runs/detect/exp*")
+        TrainPipeline().run_pipeline()
+    except Exception:
+        logger.exception("Training pipeline failed")
+        return jsonify({"error": "Training failed. Check the logs."}), 500
 
-        # Iterate over each directory and delete it
-        for exp_dir in exp_dirs:
-            shutil.rmtree(exp_dir, ignore_errors=True)
+    return jsonify({"status": "training complete"})
 
-    except ValueError as val:
-        print(val)
-        return Response("Value not found inside  json data")
-    except KeyError:
-        return Response("Key value error incorrect key passed")
-    except Exception as e:
-        print(e)
-        result = "Invalid input"
 
-    return jsonify({"image": encoded_image, "counts": counts_result})
+@app.route("/healthz")
+def healthz():
+    return jsonify(
+        {
+            "status": "ok",
+            "loaded_models": detector.loaded_models(),
+            "available_models": {
+                name: meta["available"] for name, meta in Detector.catalog().items()
+            },
+        }
+    )
+
 
 if __name__ == "__main__":
-    clApp = ClientApp()
-    app.run(host=APP_HOST, port=APP_PORT)
+    # Defaults match this repo's existing deployment constants. Port 5000 is
+    # deliberately avoided: macOS binds it to AirPlay Receiver by default.
+    app.run(
+        host=os.environ.get("HOST", "0.0.0.0"),
+        port=int(os.environ.get("PORT", "8080")),
+        debug=_env_flag("FLASK_DEBUG"),
+    )
